@@ -1,3 +1,3 @@
-export const signupRoute = () => {
-    
+export const signupRoute = (req , res) => {
+    res.send("Signup route")
 }

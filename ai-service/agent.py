@@ -1,10 +1,13 @@
 from openai import OpenAI
 from dotenv import load_dotenv
 from mem0 import Memory
-from rag.rag import search_docs
+from ats_score import calculate_ats_score
 
 load_dotenv()
 client = OpenAI()
+
+RESUME_CACHE = ""
+
 config = {
     "vector_store": {
         "provider": "qdrant",
@@ -19,146 +22,171 @@ memory_client = Memory.from_config(config)
 user_id = "Vaibhav"
 
 ANALYSIS_PROMPT = """
-You are a professional AI Resume Analyzer.
+You are a senior HR + backend engineer.
 
-Analyze the resume and return response in CLEAN MARKDOWN format.
+STRICT RULES:
+- NEVER give generic feedback
+- NEVER assume missing skills
+- ALWAYS use project evidence
+- Metrics = strong real-world impact
+- No generic suggestions like networking
+- Focus on backend growth (Docker, AWS, scaling)
+- Avoid repeating similar suggestions (e.g., Docker twice)
 
-## ✅ Strengths
-- ...
+CRITICAL:
+- DO NOT change ATS score
+- DO NOT invent weaknesses
 
-## ❌ Weaknesses
-- ...
-
-## 💡 Suggestions
-- ...
+OUTPUT FORMAT (STRICT):
 
 ## 📊 ATS Score
-**XX/100**
+<score>/100
 
-Rules:
-- Proper spacing
-- Bullet points
-- Honest HR-style feedback
+## 📌 Breakdown
+- Skills: X/30
+- Projects: X/25
+- Experience: X/20
+- Education: X/10
+- Keywords: X/15
+
+## ✅ Strengths
+- (based on real resume)
+
+## ❌ Weaknesses
+- (ONLY real gaps)
+
+## 💡 Suggestions
+- (specific, backend-focused)
 """
 
 CHAT_PROMPT = """
-You are an expert AI Resume Assistant.
+You are a senior backend engineer mentor.
 
-You MUST use resume context and also infer skill level intelligently.
-if user gives greeting or hlo give back the response and ask to upload resume for further help politely and lovelinghly with emojies.
+RULES:
+- Always use resume
+- No generic answers
+- Be practical and direct
 
-CRITICAL RULES:
-- DO NOT invent unrelated skills (e.g., customer service, attendance)
-- ONLY use skills present in resume
-- BUT you SHOULD infer strength from projects and technologies
+IF role asked:
+→ give 3–5 roles + reason
 
-IMPORTANT:
-- Real-world projects = strong evidence of skill
-- MERN stack + backend + APIs = high technical proficiency
-- Performance optimization = strong problem-solving
-- Lack of internships = slight deduction, not major
+IF roadmap asked:
+→ give next-level backend roadmap (NOT basics)
 
-RATING GUIDELINES:
-- Strong projects → 8+ score
-- Backend + APIs + DB work → 7+ system design
-- Missing soft skills → reduce communication score slightly
-
-If rating:
-- Always include:
-  - Technical Skills
-  - Problem Solving
-  - System Design / Backend
-  - Communication
-
-Tone:
-- Honest
-- Balanced
-- Insightful (like a senior engineer reviewing resume)
-
-DO NOT:
-- Underrate strong candidates
-- Ignore project experience
-- Say "not enough information" if context exists
+IF improvement asked:
+→ give only high-impact changes
 """
 
-
-def run_agent(user_query: str = None, resume_text: str = None):
-
-    if resume_text and not user_query:
-        user_query = "Analyze this resume"
-        mode = "analysis"
-    else:
-        mode = "chat"
-
-    search_memory = memory_client.search(
-        query=user_query or "resume",
-        user_id=user_id
-    )
-
-    memories = [
-        mem.get("memory", "")
-        for mem in search_memory.get("results", [])
-    ]
-
-    memory_context = "\n".join(memories) if memories else ""
-
-    if resume_text:
-        rag_context = resume_text
-    else:
-        rag_context = search_docs(user_query)
-
-    if not rag_context or "No resume data found" in rag_context:
-        rag_context = """
-User resume includes:
-- Java, JavaScript
-- MERN stack projects
-- Backend development (Node.js, Express)
-- Database experience (MongoDB, SQL)
-"""
-
-    if mode == "analysis":
-        system_prompt = ANALYSIS_PROMPT
-    else:
-        system_prompt = CHAT_PROMPT
-
-    FINAL_PROMPT = f"""
-{system_prompt}
-
-Resume Context:
-{rag_context}
-
-Previous Memory:
-{memory_context}
-
-User Query:
-{user_query}
-
-Instructions:
-- ALWAYS use resume context
-- NEVER give generic answers
-- Be specific and helpful
-"""
-
-    messages = [
-        {"role": "system", "content": FINAL_PROMPT},
-        {"role": "user", "content": user_query}
-    ]
-
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages
-    )
-
-    reply = response.choices[0].message.content
+def store_resume(resume_text):
+    global RESUME_CACHE
+    RESUME_CACHE = resume_text.strip()
 
     memory_client.add(
         user_id=user_id,
-        messages=[
-            {"role": "user", "content": user_query},
-            {"role": "assistant", "content": reply}
-        ]
+        messages=[{"role": "system", "content": f"[RESUME]\n{resume_text}"}]
     )
 
-    print("✅ memory saved")
+def get_resume():
+    global RESUME_CACHE
 
-    return reply
+    if RESUME_CACHE:
+        return RESUME_CACHE
+
+    return ""
+
+
+def enforce_output_format(reply, score, breakdown):
+    if "## ✅ Strengths" in reply:
+        clean_reply = reply.split("## ✅ Strengths")[1]
+        clean_reply = "## ✅ Strengths" + clean_reply
+    else:
+        clean_reply = reply
+
+    return f"""
+## 📊 ATS Score
+{score}/100
+
+## 📌 Breakdown
+- Skills: {breakdown['skills']}/30
+- Projects: {breakdown['projects']}/25
+- Experience: {breakdown['experience']}/20
+- Education: {breakdown['education']}/10
+- Keywords: {breakdown['keywords']}/15
+
+{clean_reply.strip()}
+"""
+
+
+
+def run_agent(user_query=None, resume_text=None):
+
+    try:
+        if resume_text:
+            store_resume(resume_text)
+            user_query = "Analyze my resume"
+            mode = "analysis"
+        else:
+            mode = "chat"
+
+        resume = get_resume()
+
+        if not resume:
+            return "👋 Upload resume first"
+        if user_query.lower().strip() in ["hi", "hello", "hey"]:
+            return "👋 Ask me anything about your resume"
+
+        ats_score, breakdown = calculate_ats_score(resume)
+
+        system_prompt = ANALYSIS_PROMPT if mode == "analysis" else CHAT_PROMPT
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": f"""
+Resume:
+{resume}
+
+Question:
+{user_query}
+
+ATS SCORE: {ats_score}
+
+Breakdown:
+Skills: {breakdown['skills']}/30
+Projects: {breakdown['projects']}/25
+Experience: {breakdown['experience']}/20
+Education: {breakdown['education']}/10
+Keywords: {breakdown['keywords']}/15
+
+STRICT:
+- Do NOT modify scores
+- Use only resume data
+"""
+            }
+        ]
+
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages
+        )
+
+        raw_reply = response.choices[0].message.content
+
+        if mode == "analysis":
+            final_reply = enforce_output_format(raw_reply, ats_score, breakdown)
+        else:
+            final_reply = raw_reply
+
+        memory_client.add(
+            user_id=user_id,
+            messages=[
+                {"role": "user", "content": user_query},
+                {"role": "assistant", "content": final_reply}
+            ]
+        )
+
+        return final_reply
+
+    except Exception as e:
+        return f"❌ Error: {str(e)}"

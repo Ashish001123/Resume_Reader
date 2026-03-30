@@ -68,3 +68,5 @@ async def upload_resume(file: UploadFile = File(...)):
             "success": False,
             "error": str(e)
         }
+
+
