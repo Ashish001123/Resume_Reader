@@ -1,25 +1,9 @@
 from openai import OpenAI
 from dotenv import load_dotenv
-from mem0 import Memory
 from ats_score import calculate_ats_score
 
 load_dotenv()
 client = OpenAI()
-
-RESUME_CACHE = ""
-
-config = {
-    "vector_store": {
-        "provider": "qdrant",
-        "config": {
-            "host": "localhost",
-            "port": 6333
-        }
-    }
-}
-
-memory_client = Memory.from_config(config)
-user_id = "Vaibhav"
 
 ANALYSIS_PROMPT = """
 You are a senior HR + backend engineer.
@@ -77,75 +61,30 @@ IF improvement asked:
 → give only high-impact changes
 """
 
-def store_resume(resume_text):
-    global RESUME_CACHE
-    RESUME_CACHE = resume_text.strip()
-
-    memory_client.add(
-        user_id=user_id,
-        messages=[{"role": "system", "content": f"[RESUME]\n{resume_text}"}]
-    )
-
-def get_resume():
-    global RESUME_CACHE
-
-    if RESUME_CACHE:
-        return RESUME_CACHE
-
-    return ""
-
-
-def enforce_output_format(reply, score, breakdown):
-    if "## ✅ Strengths" in reply:
-        clean_reply = reply.split("## ✅ Strengths")[1]
-        clean_reply = "## ✅ Strengths" + clean_reply
-    else:
-        clean_reply = reply
-
-    return f"""
-## 📊 ATS Score
-{score}/100
-
-## 📌 Breakdown
-- Skills: {breakdown['skills']}/30
-- Projects: {breakdown['projects']}/25
-- Experience: {breakdown['experience']}/20
-- Education: {breakdown['education']}/10
-- Keywords: {breakdown['keywords']}/15
-
-{clean_reply.strip()}
-"""
-
-
-
-def run_agent(user_query=None, resume_text=None):
-
+def run_agent(user_query=None, resume_text=None, history=None):
     try:
-        if resume_text:
-            store_resume(resume_text)
-            user_query = "Analyze my resume"
-            mode = "analysis"
-        else:
-            mode = "chat"
+        if not resume_text:
+            yield "👋 Upload a resume first to start."
+            return
+            
+        history = history or []
+        
+        mode = "analysis" if user_query == "Analyze my resume" else "chat"
 
-        resume = get_resume()
-
-        if not resume:
-            return "👋 Upload resume first"
-        if user_query.lower().strip() in ["hi", "hello", "hey"]:
-            return "👋 Ask me anything about your resume"
-
-        ats_score, breakdown = calculate_ats_score(resume)
+        ats_score, breakdown = calculate_ats_score(resume_text)
 
         system_prompt = ANALYSIS_PROMPT if mode == "analysis" else CHAT_PROMPT
+        
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        for msg in history:
+            messages.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
 
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": f"""
+        messages.append({
+            "role": "user",
+            "content": f"""
 Resume:
-{resume}
+{resume_text}
 
 Question:
 {user_query}
@@ -163,30 +102,21 @@ STRICT:
 - Do NOT modify scores
 - Use only resume data
 """
-            }
-        ]
+        })
 
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages
+            messages=messages,
+            stream=True
         )
-
-        raw_reply = response.choices[0].message.content
 
         if mode == "analysis":
-            final_reply = enforce_output_format(raw_reply, ats_score, breakdown)
-        else:
-            final_reply = raw_reply
+            header = f"""## 📊 ATS Score\n{ats_score}/100\n\n## 📌 Breakdown\n- Skills: {breakdown['skills']}/30\n- Projects: {breakdown['projects']}/25\n- Experience: {breakdown['experience']}/20\n- Education: {breakdown['education']}/10\n- Keywords: {breakdown['keywords']}/15\n\n"""
+            yield header
 
-        memory_client.add(
-            user_id=user_id,
-            messages=[
-                {"role": "user", "content": user_query},
-                {"role": "assistant", "content": final_reply}
-            ]
-        )
-
-        return final_reply
+        for chunk in response:
+            if chunk.choices[0].delta.content is not None:
+                yield chunk.choices[0].delta.content
 
     except Exception as e:
-        return f"❌ Error: {str(e)}"
+        yield f"❌ Error: {str(e)}"

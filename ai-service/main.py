@@ -1,12 +1,8 @@
-from fastapi import FastAPI, UploadFile, File  
+from fastapi import FastAPI
 from pydantic import BaseModel
 from agent import run_agent
 from fastapi.middleware.cors import CORSMiddleware
-import shutil   
-import os       #
-import pdfplumber 
-
-from rag.ingest import index_resume  
+from typing import List, Dict, Optional
 
 app = FastAPI()
 
@@ -18,55 +14,61 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
 class Query(BaseModel):
     message: str
+    resume_text: str
+    history: Optional[List[Dict[str, str]]] = []
 
 @app.get("/")
 def home():
-    return {"status": "🚀 AI Resume Analyzer Running"}
+    return {"status": "🚀 AI Resume Analyzer Running (Streaming Enabled)"}
 
+from fastapi.responses import StreamingResponse
 
 @app.post("/chat")
 def chat(query: Query):
     try:
-        response = run_agent(user_query=query.message)
-        return {
-            "success": True,
-            "response": response
-        }
+        # We now return a StreamingResponse, which will stream chunks as they are generated
+        return StreamingResponse(
+            run_agent(
+                user_query=query.message,
+                resume_text=query.resume_text,
+                history=query.history
+            ),
+            media_type="text/event-stream"
+        )
     except Exception as e:
         return {
             "success": False,
             "error": str(e)
         }
 
-@app.post("/upload")
-async def upload_resume(file: UploadFile = File(...)):
+from fastapi import UploadFile, File
+import shutil
+import os
+import pdfplumber
+
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/extract")
+async def extract_resume(file: UploadFile = File(...)):
     try:
         file_path = f"{UPLOAD_DIR}/{file.filename}"
-
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        index_resume(file_path)
+            
         text = ""
         with pdfplumber.open(file_path) as pdf:
             for page in pdf.pages:
                 text += page.extract_text() or ""
-        response = run_agent(resume_text=text)
-
+                
         return {
             "success": True,
-            "analysis": response
+            "text": text
         }
-
     except Exception as e:
         return {
             "success": False,
             "error": str(e)
         }
-
-
